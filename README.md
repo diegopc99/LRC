@@ -1,0 +1,2 @@
+# LRC
+Locally Recoverable Code
