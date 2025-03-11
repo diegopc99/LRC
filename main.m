@@ -1,0 +1,177 @@
+function main()
+    % Define filenames
+    outputFileName = 'OutputFile';
+    shardsFolder = 'shards';
+    
+    % Create shards directory if it does not exist
+    if ~exist(shardsFolder, 'dir')
+        mkdir(shardsFolder);
+    end
+
+    % Delete old output file if it exists
+    if exist(outputFileName, 'file')
+        delete(outputFileName);
+        fprintf('Previous output file deleted: %s\n', outputFileName);
+    end
+    
+    % Load input file (with random bytes)
+    inputFileName = 'testfiles\1KB';
+    fileID = fopen(inputFileName, 'r');
+    if fileID == -1
+        error('Error: Could not open file %s.', inputFileName);
+    end
+    data = fread(fileID, '*uint8')';
+    fclose(fileID);
+    
+    fprintf('Loaded file: %s (%d bytes)\n', inputFileName, length(data));
+
+    % Define LDPC parameters
+    n = 9; % Total number of shards
+    k = 4; % Number of data symbols per group
+    
+    subsets = [1 214 215 2 177 179 3 100 103];
+    subsets_gf = gf(subsets, 8);
+    
+    % Encoding
+    shards = encode(data, subsets_gf, n, k);
+
+    % Save shards to the shards directory
+    for i = 1:n
+        shardFileName = fullfile(shardsFolder, sprintf('shard_%d.dat', i));
+        fileID = fopen(shardFileName, 'w');
+        if fileID == -1
+            error('Error: Could not create file %s.', shardFileName);
+        end
+        fwrite(fileID, shards(i, :), 'uint8');
+        fclose(fileID);
+    end
+    fprintf('Shards saved in folder: %s\n', shardsFolder);
+    
+    % Pause execution to allow manual deletion of shards
+    input('Execution paused. Delete any shard files and press Enter to continue...\n', 's');
+    
+    % Initialize recovery shards matrix
+    rows = ceil(length(data) / k);
+    recov_shards = gf(zeros(n, rows), 8); 
+    index = zeros(1, n); % Array to store missing shard indices
+
+    % Read available shards from files
+    for i = 1:n
+        shardFileName = fullfile(shardsFolder, sprintf('shard_%d.dat', i));
+        fileID = fopen(shardFileName, 'r');
+        if fileID ~= -1
+            % Shard exists, read and store it
+            recov_shards(i, :) = gf(fread(fileID, rows, 'uint8')', 8);
+            fclose(fileID);
+        else
+            index(i) = 1; % Mark shard as missing
+        end
+    end
+
+    % Find indices of missing shards
+    removed_shard_index = find(index); 
+
+    % Ensure at most one missing shard per subset (check every 3 shards)
+    for j = 1:3:n
+        if j+2 <= n  % Prevent out-of-bounds errors
+            a = index(j);
+            b = index(j + 1);
+            c = index(j + 2);
+
+            if (a && b) || (a && c) || (b && c)
+                error('Error: Two shards from the same subset are missing, recovery is not possible.');
+            end
+        end
+    end
+
+    % Recover missing shards
+    recovered_shards = recover(recov_shards, removed_shard_index, n, subsets_gf);
+    
+    % Write recovered shards back to files
+    for i = 1:length(removed_shard_index)
+        missing_index = removed_shard_index(i);
+    
+        fprintf('Size of recovered_shards: [%d, %d]\n', size(recovered_shards));
+        fprintf('Missing index: %d\n', missing_index);
+
+        % Check if missing_index is within bounds
+        if missing_index < 1 || missing_index > size(recovered_shards, 1)
+            error('Invalid shard index detected: %d (out of bounds)', missing_index);
+        end
+    
+        recoveredFileName = fullfile(shardsFolder, sprintf('shard_%d.dat', missing_index));
+        fileID = fopen(recoveredFileName, 'w');
+        if fileID == -1
+            error('Error: Could not create recovered shard file %s.', recoveredFileName);
+        end
+        
+        % Access the recovered shard directly
+        shard = recovered_shards(missing_index); % Convert GF to double if necessary
+        castedShard = uint8(double(shard.x)); % Convert to uint8
+        fwrite(fileID, castedShard, 'uint8');
+        fclose(fileID);
+        fprintf('Recovered shard written: %s\n', recoveredFileName);
+    end
+
+    % Initialize recovered shards matrix
+    post_recov_shards = gf(zeros(n, ceil(length(data) / k)), 8);
+    
+    % Read each shard file
+    for i = 1:n
+        shardFileName = fullfile(shardsFolder, sprintf('shard_%d.dat', i));
+        
+        if exist(shardFileName, 'file')
+            fileID = fopen(shardFileName, 'r');
+            shardData = fread(fileID, '*uint8'); % Read data as uint8
+            fclose(fileID);
+            
+            % Ensure the shard is correctly placed in the matrix
+            post_recov_shards(i, 1:length(shardData)) = gf(shardData, 8);
+            fprintf('Shard %d loaded successfully.\n', i);
+        else
+            fprintf('Warning: Missing shard file %s\n', shardFileName);
+        end
+    end
+        
+    % Decoding
+    decoded_data = decode(post_recov_shards, subsets_gf, n, k);
+    
+    % Write decoded data to output file
+    fileID = fopen(outputFileName, 'w');
+    if fileID == -1
+        error('Error: Could not create output file %s.', outputFileName);
+    end
+    fwrite(fileID, decoded_data, 'uint8');
+    fclose(fileID);
+    
+    % Compare original and recovered files
+    compare_files(outputFileName, inputFileName);
+end
+
+function compare_files(file1, file2)
+    % Open and read both files
+    fileID1 = fopen(file1, 'r');
+    fileID2 = fopen(file2, 'r');
+    
+    if fileID1 == -1
+        error('Error: Could not open file %s.', file1);
+    end
+    if fileID2 == -1
+        error('Error: Could not open file %s.', file2);
+    end
+    
+    % Read file contents as uint8
+    data1 = fread(fileID1, '*uint8');
+    data2 = fread(fileID2, '*uint8');
+    
+    % Close file handles
+    fclose(fileID1);
+    fclose(fileID2);
+    
+    % Compare files
+    if isequal(data1, data2)
+        fprintf('Success: The files are identical.\n');
+    else
+        fprintf('Error: The files are different.\n');
+    end
+end
